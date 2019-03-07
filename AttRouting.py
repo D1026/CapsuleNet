@@ -1,7 +1,7 @@
 """
 Dynamic Routing Between Capsules
 https://arxiv.org/abs/1710.09829
-PyTorch implementation by Ivan_Duan @ AntFin.AI Depart.
+
 """
 import sys
 
@@ -13,15 +13,18 @@ import numpy as np
 
 
 class CapsuleLayer(nn.Module):
-    def __init__(self, input_dim, output_dim, input_atoms, output_atoms, num_routing=3, leaky=False, kernel_size=None, stride=None,
+    def __init__(self, input_dim, output_dim, input_atoms, output_atoms, leaky=False, kernel_size=None, stride=None,
                  ):
         super(CapsuleLayer, self).__init__()
         self.input_shape = (input_dim, input_atoms)  # omit batch dim
         self.output_shape = (output_dim, output_atoms)
-        self.num_routing = num_routing
+
         self.leaky = leaky
         self.weights = nn.Parameter(torch.randn(input_dim, input_atoms, output_dim * output_atoms))
         self.biases = nn.Parameter(torch.randn(output_dim, output_atoms))
+
+        self.attW = nn.Parameter(torch.randn(input_dim, output_dim))
+        self.attB = nn.Parameter(torch.randn(input_dim, output_dim))
 
     def _squash(self, input_tensor):
         norm = torch.norm(input_tensor, dim=2, keepdim=True)
@@ -44,28 +47,40 @@ class CapsuleLayer(nn.Module):
         loss = torch.mean(per_example_loss)
         return loss
 
-    def forward(self, x):
+    def forward(self, x, labelsVec):
+
+        att = torch.matmul(x, labelsVec.transpose(0, 1))    # [b, i, j]
+        att = F.normalize(att, dim=-1)
+        # ---
+        # print(' --- x ---')
+        # print(x.detach().cpu().numpy().tolist()[0])
+        # print(' --- Vec --- ')
+        # print(labelsVec.detach().cpu().numpy().tolist()[0])
+        # print(' --- before softmax --- ')
+        # print(att.detach().cpu().numpy().tolist()[0])
+
         x = x.unsqueeze(-1).repeat(1, 1, 1, self.output_shape[0]*self.output_shape[1])  # [b, i, i_o, j*j_o]
         votes = torch.sum(x * self.weights, dim=2)  # [b, i, j*j_o]
         votes_reshaped = torch.reshape(votes,
                                        [-1, self.input_shape[0], self.output_shape[0], self.output_shape[1]])  # [b, i, j, j_o]
-        # votes_t_shape = [3, 0, 1, 2]
-        # votes_trans = votes_reshaped.permute(*votes_t_shape)
 
         # routing loop
-        logits = torch.zeros(x.shape[0], self.input_shape[0], self.output_shape[0]).to(x.device.type)  # [b, i, j]
-        for i in range(self.num_routing):
-            if self.leaky:
-                route = self._leaky_route(logits, self.output_shape[0])
-            else:
-                route = F.softmax(logits, dim=2)
-            route = route.unsqueeze(-1)  # [b, i, j, 1]
-            preactivate_unrolled = route * votes_reshaped   # [b, i, j, j_o]
-            s = preactivate_unrolled.sum(1, keepdim=True) + self.biases  # [b, 1, j, j_o]
-            v = self._squash(s)
+        att = F.softmax(att, dim=-1)
 
-            distances = (votes_reshaped * v).sum(dim=3)  # [b, i, j]
-            logits = logits + distances
+        # --- att * w + b ---
+        att = att * self.attW + 1.0
+        # att = att * self.attW + self.attB
+        # ---
+        # print('--- Attention weights ---')
+        # print(att.detach().cpu().numpy().tolist()[0])
+        # print(' --- ')
+        att = att.unsqueeze(-1)   # [b, i, j, 1]
+
+        preactivate_unrolled = att * votes_reshaped   # [b, i, j, j_o]
+
+        s = preactivate_unrolled.sum(1, keepdim=True) + self.biases  # [b, 1, j, j_o]
+        v = self._squash(s)
+
 
         return v
 
